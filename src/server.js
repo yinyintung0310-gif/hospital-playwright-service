@@ -1,6 +1,7 @@
 const express = require('express');
 const { registerEdahRoute } = require('./routes/edah');
 const { registerMmhRoute } = require('./routes/mmh');
+const { registerVghtpeRoute } = require('./routes/vghtpe');
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -11,7 +12,7 @@ app.get('/', (_req, res) => {
   res.json({
     service: 'playwright-service',
     status: 'ok',
-    routes: ['/health', '/search/edah', '/search/mmh']
+    routes: ['/health', '/search/edah', '/search/mmh', '/search/vghtpe']
   });
 });
 
@@ -25,6 +26,7 @@ app.get('/health', (_req, res) => {
 
 registerEdahRoute(app);
 registerMmhRoute(app);
+registerVghtpeRoute(app);
 
 app.use((err, _req, res, _next) => {
   console.error(err);
