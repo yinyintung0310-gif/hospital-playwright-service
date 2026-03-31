@@ -4,66 +4,45 @@ const { successResponse, errorResponse } = require('../lib/response');
 const EDAH = {
   hospitalId: 'edah',
   hospitalName: '義大醫院',
-  searchUrl: 'https://www.edah.org.tw/medicine/'
+  searchUrl: 'https://dept.edah.org.tw/ph/asp/search.asp?TAB=1&orgby=ED'
 };
 
-const SEARCH_SELECTORS = [
-  'input[type="search"]',
-  'input[name*="drug" i]',
-  'input[id*="drug" i]',
-  'input[name*="keyword" i]',
-  'input[id*="keyword" i]',
-  'input[name*="query" i]',
-  'input[id*="query" i]',
-  'input[type="text"]'
-];
+async function extractResults(page) {
+  return page.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll('table tr'));
+    const results = [];
 
-const SUBMIT_SELECTORS = [
-  'button[type="submit"]',
-  'input[type="submit"]',
-  'button:has-text("查詢")',
-  'button:has-text("搜尋")',
-  'input[value*="查詢"]',
-  'input[value*="搜尋"]'
-];
+    for (const row of rows) {
+      const cells = Array.from(row.querySelectorAll('td'));
+      if (cells.length < 8) continue;
 
-async function findFirstVisible(page, selectors) {
-  for (const selector of selectors) {
-    const handle = page.locator(selector).first();
-    if (await handle.count()) {
-      try {
-        if (await handle.isVisible({ timeout: 500 })) return handle;
-      } catch {
-        // ignore and try the next candidate
-      }
-    }
-  }
-  return null;
-}
+      const genericName = (cells[0].innerText || '').replace(/\s+/g, ' ').trim();
+      const code = (cells[1].innerText || '').replace(/\s+/g, ' ').trim();
+      const brandName = (cells[2].innerText || '').replace(/\s+/g, ' ').trim();
+      const chineseName = (cells[3].innerText || '').replace(/\s+/g, ' ').trim();
+      const strength = (cells[4].innerText || '').replace(/\s+/g, ' ').trim();
+      const pregnancyCategory = (cells[6].innerText || '').replace(/\s+/g, ' ').trim();
 
-async function extractRows(page, keyword) {
-  const lowerKeyword = keyword.toLowerCase();
-  return await page.evaluate((kw) => {
-    const rows = [];
-    const candidates = Array.from(document.querySelectorAll('table tr, .table tr, .card, .result, .search-result li'));
+      if (!genericName || !code || !brandName) continue;
+      if (genericName === '學名' || brandName === '商品名') continue;
 
-    for (const el of candidates) {
-      const text = (el.innerText || '').replace(/\s+/g, ' ').trim();
-      if (!text) continue;
-      if (!text.toLowerCase().includes(kw)) continue;
+      const detailHref = row.querySelector('a[href*="med_d.asp"]')?.getAttribute('href') || '';
+      const imageSrc = row.querySelector('img')?.getAttribute('src') || '';
 
-      const matchStrength = text.match(/(\d+(?:\.\d+)?)\s*(mg|ml|mcg|g|iu|u)\b/i);
-      rows.push({
-        genericName: text.match(/[A-Z][A-Za-z0-9\-]*(?:\s+[A-Za-z0-9\-]+){0,5}/)?.[0] || '',
-        chineseName: text.match(/[\u4e00-\u9fff]{2,20}/)?.[0] || '',
-        brandName: '',
-        strength: matchStrength ? `${matchStrength[1]}${matchStrength[2]}` : '',
-        rawText: text
+      results.push({
+        genericName,
+        chineseName,
+        brandName,
+        strength,
+        code,
+        pregnancyCategory,
+        detailUrl: detailHref ? new URL(detailHref, window.location.href).toString() : '',
+        imageUrl: imageSrc ? new URL(imageSrc, window.location.href).toString() : ''
       });
     }
 
-    return rows;
-  }, lowerKeyword);
+    return results;
+  });
 }
 
 async function searchEdah(keyword) {
@@ -78,36 +57,23 @@ async function searchEdah(keyword) {
       await page.goto(EDAH.searchUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
       await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
 
-      const input = await findFirstVisible(page, SEARCH_SELECTORS);
-      if (!input) {
-        throw new Error('Could not find a searchable input on the EDAH page.');
+      const genericInput = page.locator('#SCI_NAME');
+      const submitButton = page.locator('input[type="submit"][value="查詢"]').first();
+
+      if (!(await genericInput.count())) {
+        throw new Error(`EDAH search form did not render. Current URL: ${page.url()}`);
       }
 
-      await input.click();
-      await input.fill(keyword);
+      await genericInput.fill(keyword.toLowerCase());
 
-      const submit = await findFirstVisible(page, SUBMIT_SELECTORS);
-      if (submit) {
-        await Promise.all([
-          page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {}),
-          submit.click()
-        ]);
-      } else {
-        await Promise.all([
-          page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {}),
-          input.press('Enter')
-        ]);
-      }
+      await Promise.all([
+        page.waitForURL(/med\.asp/i, { timeout: 20000 }).catch(() => {}),
+        page.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {}),
+        submitButton.click()
+      ]);
+      await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
 
-      const rows = await extractRows(page, keyword);
-      const results = rows.map((row) => ({
-        genericName: row.genericName,
-        chineseName: row.chineseName,
-        brandName: row.brandName,
-        strength: row.strength,
-        rawText: row.rawText
-      }));
-
+      const results = await extractResults(page);
       return successResponse({ ...EDAH, keyword, results });
     } finally {
       await context.close();
@@ -129,9 +95,10 @@ function registerEdahRoute(app) {
         results: [
           {
             genericName: 'Febuxostat',
-            chineseName: '福避痛膜衣錠',
-            brandName: 'Feburic',
-            strength: '80mg/tab'
+            chineseName: '達理痛膜衣錠',
+            brandName: 'Febuton',
+            strength: '80mg/FC. tab',
+            code: 'KFEBUXO'
           }
         ]
       }));
@@ -151,4 +118,3 @@ function registerEdahRoute(app) {
 }
 
 module.exports = { registerEdahRoute };
-
