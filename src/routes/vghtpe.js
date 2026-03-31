@@ -67,6 +67,47 @@ async function extractResults(page, keyword) {
   }, keyword);
 }
 
+async function inspectPage(page) {
+  return page.evaluate(() => {
+    const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
+    const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4'))
+      .map((node) => normalize(node.innerText))
+      .filter(Boolean)
+      .slice(0, 10);
+    const formFields = Array.from(document.querySelectorAll('form input, form select, form textarea, form button'))
+      .map((node) => {
+        const tag = node.tagName.toLowerCase();
+        const type = node.getAttribute('type') || '';
+        const name = node.getAttribute('name') || node.getAttribute('id') || '';
+        const value = node.getAttribute('value') || '';
+        return [tag, type, name, value].filter(Boolean).join(':');
+      })
+      .filter(Boolean)
+      .slice(0, 20);
+    const tables = Array.from(document.querySelectorAll('table')).slice(0, 5).map((table, tableIndex) => ({
+      tableIndex,
+      rows: Array.from(table.querySelectorAll('tr')).slice(0, 8).map((row) =>
+        Array.from(row.querySelectorAll('th,td')).map((cell) => normalize(cell.innerText)).filter(Boolean)
+      )
+    }));
+    const alerts = Array.from(document.querySelectorAll('.alert, .warning, .error, .invalid-feedback, .help-block'))
+      .map((node) => normalize(node.innerText))
+      .filter(Boolean)
+      .slice(0, 10);
+    const bodyText = normalize(document.body.innerText).slice(0, 1200);
+
+    return {
+      title: document.title,
+      url: window.location.href,
+      headings,
+      formFields,
+      alerts,
+      tables,
+      bodyText
+    };
+  });
+}
+
 async function searchVghtpe(keyword) {
   return withBrowser(async (browser) => {
     const context = await browser.newContext({
@@ -94,6 +135,10 @@ async function searchVghtpe(keyword) {
       }
 
       const results = await extractResults(page, keyword);
+      if (results.length === 0) {
+        const debug = await inspectPage(page);
+        throw new Error(`VGHTPE returned no parsed results. DEBUG ${JSON.stringify(debug)}`);
+      }
       return successResponse({ ...VGHTPE, keyword, results });
     } finally {
       await context.close();
