@@ -1,4 +1,4 @@
-const https = require('https');
+const { withBrowser } = require('../lib/browser');
 const { successResponse, errorResponse } = require('../lib/response');
 
 const MMH = {
@@ -20,93 +20,101 @@ function extractStrength(...values) {
 }
 
 async function searchMmh(keyword) {
-  const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36';
+  return withBrowser(async (browser) => {
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 1024 },
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+    });
+    const page = await context.newPage();
 
-  const payload = JSON.stringify({
-    data: {
-      TYPE: '',
-      DRUG: keyword.trim(),
-      IMG: 'N',
-      myHospital: '1'
+    try {
+      await page.goto(MMH.searchUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+      const bodyText = clean(await page.textContent('body').catch(() => ''));
+      if (/request rejected|access denied|forbidden/i.test(bodyText)) {
+        throw new Error(`MMH page access blocked. BODY: ${bodyText.slice(0, 240)}`);
+      }
+
+      const apiResult = await page.evaluate(async ({ apiUrl, keyword: currentKeyword }) => {
+        try {
+          const response = await fetch(apiUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json; charset=utf-8',
+              'X-Requested-With': 'XMLHttpRequest',
+              Accept: 'application/json, text/javascript, */*; q=0.01'
+            },
+            body: JSON.stringify({
+              data: {
+                TYPE: '',
+                DRUG: currentKeyword.trim(),
+                IMG: 'N',
+                myHospital: '1'
+              }
+            })
+          });
+
+          const text = await response.text();
+          return {
+            ok: response.ok,
+            status: response.status,
+            text
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            status: 0,
+            text: '',
+            error: error instanceof Error ? error.message : String(error)
+          };
+        }
+      }, { apiUrl: MMH.apiUrl, keyword });
+
+      if (apiResult.error) {
+        throw new Error(`MMH browser fetch failed: ${apiResult.error}`);
+      }
+
+      if (!apiResult.ok) {
+        throw new Error(`MMH API failed (${apiResult.status}). Body: ${clean(apiResult.text).slice(0, 240)}`);
+      }
+
+      let json;
+      try {
+        json = JSON.parse(apiResult.text);
+      } catch (_error) {
+        throw new Error(`MMH API did not return JSON. Body: ${clean(apiResult.text).slice(0, 240)}`);
+      }
+
+      if (!Array.isArray(json)) {
+        throw new Error(`MMH API returned unexpected payload. Body: ${clean(apiResult.text).slice(0, 240)}`);
+      }
+
+      const results = json
+        .filter((item) => clean(item.Status).toUpperCase() === 'Y')
+        .map((item) => {
+          const code = clean(item.mcode);
+          return {
+            code,
+            genericName: clean(item.generic),
+            brandName: clean(item.ename),
+            chineseName: clean(item.cname),
+            strength: extractStrength(item.ename, item.generic, item.cname),
+            detailUrl: code ? new URL(`DrugQuery1.html?mcode=${encodeURIComponent(code)}`, MMH.searchUrl).toString() : '',
+            indication: clean(item.indication),
+            appearance: clean(item.appear_t),
+            precautions: clean(item.patnote),
+            storage: clean(item.tore),
+            insuranceCode: clean(item.nhi_c),
+            licenseUrl: clean(item.license)
+          };
+        });
+
+      return successResponse({ ...MMH, keyword, results });
+    } finally {
+      await context.close();
     }
   });
-
-  const url = new URL(MMH.apiUrl);
-  const text = await new Promise((resolve, reject) => {
-    const request = https.request({
-      protocol: url.protocol,
-      hostname: MMH.apiIpv4,
-      port: url.port || 443,
-      path: `${url.pathname}${url.search}`,
-      method: 'POST',
-      family: 4,
-      servername: url.hostname,
-      headers: {
-        Host: url.hostname,
-        'User-Agent': userAgent,
-        'Content-Type': 'application/json; charset=utf-8',
-        'Content-Length': Buffer.byteLength(payload),
-        'X-Requested-With': 'XMLHttpRequest',
-        Origin: 'https://mcloud.mmh.org.tw',
-        Referer: MMH.searchUrl
-      }
-    }, (response) => {
-      const chunks = [];
-      response.on('data', (chunk) => chunks.push(chunk));
-      response.on('end', () => {
-        const body = Buffer.concat(chunks).toString('utf8');
-        if ((response.statusCode || 0) >= 400) {
-          reject(new Error(`MMH API failed (${response.statusCode}). Body: ${clean(body).slice(0, 240)}`));
-          return;
-        }
-        resolve(body);
-      });
-    });
-
-    request.on('error', (error) => {
-      reject(new Error(`MMH HTTPS request failed: ${error.message}`));
-    });
-
-    request.setTimeout(15000, () => {
-      request.destroy(new Error('MMH HTTPS request timed out after 15000ms'));
-    });
-
-    request.write(payload);
-    request.end();
-  });
-
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch (_error) {
-    throw new Error(`MMH API did not return JSON. Body: ${clean(text).slice(0, 240)}`);
-  }
-
-  if (!Array.isArray(json)) {
-    throw new Error(`MMH API returned unexpected payload. Body: ${clean(text).slice(0, 240)}`);
-  }
-
-  const results = json
-    .filter((item) => clean(item.Status).toUpperCase() === 'Y')
-    .map((item) => {
-      const code = clean(item.mcode);
-      return {
-        code,
-        genericName: clean(item.generic),
-        brandName: clean(item.ename),
-        chineseName: clean(item.cname),
-        strength: extractStrength(item.ename, item.generic, item.cname),
-        detailUrl: code ? new URL(`DrugQuery1.html?mcode=${encodeURIComponent(code)}`, MMH.searchUrl).toString() : '',
-        indication: clean(item.indication),
-        appearance: clean(item.appear_t),
-        precautions: clean(item.patnote),
-        storage: clean(item.tore),
-        insuranceCode: clean(item.nhi_c),
-        licenseUrl: clean(item.license)
-      };
-    });
-
-  return successResponse({ ...MMH, keyword, results });
 }
 
 function registerMmhRoute(app) {
