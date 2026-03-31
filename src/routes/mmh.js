@@ -5,7 +5,8 @@ const MMH = {
   hospitalId: 'mmh',
   hospitalName: '馬偕紀念醫院',
   searchUrl: 'https://mcloud.mmh.org.tw/DMZDrugFormB817/DrugQuery.html',
-  apiUrl: 'https://mcloud.mmh.org.tw/DMZDrugFormB817/api/GetDrug'
+  apiUrl: 'https://mcloud.mmh.org.tw/DMZDrugFormB817/api/GetDrug',
+  apiIpv4: '60.251.96.49'
 };
 
 function clean(value) {
@@ -34,11 +35,14 @@ async function searchMmh(keyword) {
   const text = await new Promise((resolve, reject) => {
     const request = https.request({
       protocol: url.protocol,
-      hostname: url.hostname,
+      hostname: MMH.apiIpv4,
       port: url.port || 443,
       path: `${url.pathname}${url.search}`,
       method: 'POST',
+      family: 4,
+      servername: url.hostname,
       headers: {
+        Host: url.hostname,
         'User-Agent': userAgent,
         'Content-Type': 'application/json; charset=utf-8',
         'Content-Length': Buffer.byteLength(payload),
@@ -61,6 +65,10 @@ async function searchMmh(keyword) {
 
     request.on('error', (error) => {
       reject(new Error(`MMH HTTPS request failed: ${error.message}`));
+    });
+
+    request.setTimeout(15000, () => {
+      request.destroy(new Error('MMH HTTPS request timed out after 15000ms'));
     });
 
     request.write(payload);
