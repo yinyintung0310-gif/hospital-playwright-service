@@ -1,10 +1,10 @@
-const { withBrowser } = require('../lib/browser');
 const { successResponse, errorResponse } = require('../lib/response');
 
 const MMH = {
   hospitalId: 'mmh',
   hospitalName: '馬偕紀念醫院',
-  searchUrl: 'https://mcloud.mmh.org.tw/DMZDrugFormB817/DrugQuery.html'
+  searchUrl: 'https://mcloud.mmh.org.tw/DMZDrugFormB817/DrugQuery.html',
+  apiUrl: 'https://mcloud.mmh.org.tw/DMZDrugFormB817/api/GetDrug'
 };
 
 function clean(value) {
@@ -17,103 +17,61 @@ function extractStrength(...values) {
   return match ? clean(match[0]) : '';
 }
 
-async function callGetDrug(page, payload) {
-  return page.evaluate(async (requestPayload) => {
-    const response = await fetch('api/GetDrug', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        'X-Requested-With': 'XMLHttpRequest'
-      },
-      body: JSON.stringify({ data: requestPayload })
-    });
-
-    const text = await response.text();
-    let json = null;
-    try {
-      json = JSON.parse(text);
-    } catch (_error) {
-      json = null;
-    }
-
-    return {
-      ok: response.ok,
-      status: response.status,
-      url: response.url,
-      text,
-      json
-    };
-  }, payload);
-}
-
 async function searchMmh(keyword) {
-  return withBrowser(async (browser) => {
-    const context = await browser.newContext({
-      viewport: { width: 1440, height: 1024 },
-      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
-    });
-    const page = await context.newPage();
+  const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36';
 
-    try {
-      await page.goto(MMH.searchUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-      await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-
-      if (!(await page.locator('#txtDrug').count())) {
-        throw new Error(`MMH search form did not render. Current URL: ${page.url()}`);
-      }
-
-      const searchResponse = await callGetDrug(page, {
+  const response = await fetch(MMH.apiUrl, {
+    method: 'POST',
+    headers: {
+      'User-Agent': userAgent,
+      'Content-Type': 'application/json; charset=utf-8',
+      'X-Requested-With': 'XMLHttpRequest',
+      Origin: 'https://mcloud.mmh.org.tw',
+      Referer: MMH.searchUrl
+    },
+    body: JSON.stringify({
+      data: {
         TYPE: '',
         DRUG: keyword.trim(),
         IMG: 'N',
         myHospital: '1'
-      });
-
-      if (!searchResponse.ok || !Array.isArray(searchResponse.json)) {
-        throw new Error(`MMH search API failed (${searchResponse.status}). Body: ${clean(searchResponse.text).slice(0, 240)}`);
       }
-
-      const matches = searchResponse.json.filter((item) => clean(item.Status).toUpperCase() === 'Y');
-      const results = [];
-
-      for (const match of matches) {
-        const code = clean(match.mcode);
-        const detailResponse = code
-          ? await callGetDrug(page, {
-              TYPE: '',
-              DRUG: code,
-              IMG: 'Y',
-              myHospital: '1'
-            })
-          : null;
-        const detailItem = Array.isArray(detailResponse?.json) ? detailResponse.json[0] : null;
-
-        results.push({
-          code,
-          genericName: clean(detailItem?.generic || match.generic),
-          brandName: clean(detailItem?.ename || match.ename),
-          chineseName: clean(detailItem?.cname || match.cname),
-          strength: extractStrength(
-            detailItem?.ename,
-            detailItem?.generic,
-            match.ename,
-            match.generic,
-            match.cname
-          ),
-          detailUrl: code ? new URL(`DrugQuery1.html?mcode=${encodeURIComponent(code)}`, MMH.searchUrl).toString() : '',
-          indication: clean(detailItem?.indication),
-          appearance: clean(detailItem?.appear_t),
-          precautions: clean(detailItem?.patnote),
-          storage: clean(detailItem?.tore),
-          insuranceCode: clean(detailItem?.nhi_c)
-        });
-      }
-
-      return successResponse({ ...MMH, keyword, results });
-    } finally {
-      await context.close();
-    }
+    })
   });
+
+  const text = await response.text();
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (_error) {
+    throw new Error(`MMH API did not return JSON (${response.status}). Body: ${clean(text).slice(0, 240)}`);
+  }
+
+  if (!response.ok || !Array.isArray(json)) {
+    throw new Error(`MMH API failed (${response.status}). Body: ${clean(text).slice(0, 240)}`);
+  }
+
+  const results = json
+    .filter((item) => clean(item.Status).toUpperCase() === 'Y')
+    .map((item) => {
+      const code = clean(item.mcode);
+      return {
+        code,
+        genericName: clean(item.generic),
+        brandName: clean(item.ename),
+        chineseName: clean(item.cname),
+        strength: extractStrength(item.ename, item.generic, item.cname),
+        detailUrl: code ? new URL(`DrugQuery1.html?mcode=${encodeURIComponent(code)}`, MMH.searchUrl).toString() : '',
+        indication: clean(item.indication),
+        appearance: clean(item.appear_t),
+        precautions: clean(item.patnote),
+        storage: clean(item.tore),
+        insuranceCode: clean(item.nhi_c),
+        licenseUrl: clean(item.license)
+      };
+    });
+
+  return successResponse({ ...MMH, keyword, results });
 }
 
 function registerMmhRoute(app) {
@@ -129,10 +87,10 @@ function registerMmhRoute(app) {
         keyword,
         results: [
           {
-            code: '28403',
-            genericName: 'Febuxostat',
-            brandName: 'Feburic F.C. Tablets',
-            chineseName: '福避痛膜衣錠',
+            code: '23738',
+            genericName: 'Febuxostat 80mg FC tab',
+            brandName: 'Febuton F.C. Tablets 80mg (Febuxostat)',
+            chineseName: '達理痛膜衣錠80毫克',
             strength: '80mg'
           }
         ]
