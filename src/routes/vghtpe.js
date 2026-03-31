@@ -81,9 +81,41 @@ async function extractResults(page, keyword) {
     const results = [];
     const rows = Array.from(document.querySelectorAll('table tr'));
 
+    const parseMixedName = (value) => {
+      const text = normalize(value);
+      const genericMatch = text.match(/\(([^()]+)\)\s*$/);
+      const genericName = genericMatch ? normalize(genericMatch[1]) : '';
+      const withoutGeneric = genericMatch ? normalize(text.slice(0, genericMatch.index)) : text;
+      const strengthMatch = withoutGeneric.match(/\b\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|iu|units?)\b(?:\/[A-Za-z.]+)?/i);
+      const strength = strengthMatch ? normalize(strengthMatch[0]) : '';
+      const withoutStrength = strengthMatch
+        ? normalize(withoutGeneric.replace(strengthMatch[0], ' '))
+        : withoutGeneric;
+      const firstAsciiIndex = withoutStrength.search(/[A-Za-z]/);
+      const chineseName = firstAsciiIndex === -1
+        ? withoutStrength
+        : normalize(withoutStrength.slice(0, firstAsciiIndex));
+      const englishSegment = firstAsciiIndex === -1
+        ? ''
+        : normalize(withoutStrength.slice(firstAsciiIndex));
+      const brandName = normalize(
+        englishSegment.replace(
+          /\b(?:FC|F\.C\.|ER|XR|SR|CR|DR|EC|film|coated|tab|tabs|tablet|tablets|cap|caps|capsule|capsules|inj|injection|oral|soln|solution|susp|suspension)\b.*$/i,
+          ''
+        )
+      ) || englishSegment;
+
+      return {
+        genericName,
+        chineseName,
+        brandName,
+        strength
+      };
+    };
+
     for (const row of rows) {
       const cells = Array.from(row.querySelectorAll('td'));
-      if (cells.length < 2) continue;
+      if (cells.length < 3) continue;
 
       const texts = cells.map((cell) => normalize(cell.innerText)).filter(Boolean);
       if (!texts.length) continue;
@@ -91,20 +123,16 @@ async function extractResults(page, keyword) {
       const rowText = texts.join(' | ');
       if (!rowText.toLowerCase().includes(keywordLower)) continue;
 
-      const englishTexts = texts.filter((text) => /[A-Za-z]/.test(text));
-      const chineseTexts = texts.filter((text) => /[\u4e00-\u9fff]/.test(text));
-      const genericName = englishTexts.find((text) => text.toLowerCase().includes(keywordLower)) || searchKeyword;
-      const chineseName = chineseTexts.find((text) => !text.includes('查詢') && !text.includes('藥品')) || '';
-      const brandName = englishTexts.find((text) => text !== genericName) || '';
-      const strengthMatch = rowText.match(/\b\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|iu|units?)\b(?:\/[A-Za-z.]+)?/i);
-      const code = texts.find((text) => /^[A-Z0-9-]{4,}$/i.test(text) && !text.toLowerCase().includes(keywordLower)) || '';
+      const code = texts[0] || '';
+      const detailCell = texts.find((text) => text.toLowerCase().includes(keywordLower)) || texts[2] || '';
+      const parsed = parseMixedName(detailCell);
       const link = row.querySelector('a[href]')?.getAttribute('href') || '';
 
       results.push({
-        genericName,
-        chineseName,
-        brandName,
-        strength: strengthMatch ? normalize(strengthMatch[0]) : '',
+        genericName: parsed.genericName || searchKeyword,
+        chineseName: parsed.chineseName,
+        brandName: parsed.brandName,
+        strength: parsed.strength,
         code,
         detailUrl: link ? new URL(link, window.location.href).toString() : '',
         rawRow: rowText
