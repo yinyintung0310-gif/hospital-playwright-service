@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright:v1.55.0-noble
+FROM mcr.microsoft.com/playwright:v1.58.2-noble
 
 WORKDIR /app
 
@@ -13,4 +13,3 @@ ENV PORT=3000
 EXPOSE 3000
 
 CMD ["npm", "start"]
-
