@@ -1,5 +1,6 @@
 const { withBrowser } = require('../lib/browser');
 const { successResponse, errorResponse } = require('../lib/response');
+const { createWorker, PSM } = require('tesseract.js');
 
 const VGHTPE = {
   hospitalId: 'vghtpe',
@@ -9,12 +10,13 @@ const VGHTPE = {
 
 async function waitForSearchForm(page) {
   const input = page.locator('input[name="extConditions[keyWord]"]').first();
+  const captchaInput = page.locator('input[name="kapatcha"]').first();
   const submit = page.locator('button[type="submit"], input[type="submit"]').first();
   const deadline = Date.now() + 60000;
 
   while (Date.now() < deadline) {
-    if (await input.count()) {
-      return { input, submit };
+    if (await input.count() && await captchaInput.count()) {
+      return { input, captchaInput, submit };
     }
 
     await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
@@ -24,6 +26,52 @@ async function waitForSearchForm(page) {
 
   const title = await page.title().catch(() => '');
   throw new Error(`VGHTPE search form did not render. URL: ${page.url()} TITLE: ${title}`);
+}
+
+async function markCaptchaElement(page) {
+  return page.evaluate(() => {
+    const input = document.querySelector('input[name="kapatcha"]');
+    if (!input) return '';
+
+    const mark = (node) => {
+      if (!node) return '';
+      node.setAttribute('data-codex-captcha', '1');
+      return '[data-codex-captcha="1"]';
+    };
+
+    let node = input.parentElement;
+    for (let depth = 0; node && depth < 6; depth += 1, node = node.parentElement) {
+      const candidate = node.querySelector('img, canvas');
+      if (candidate) return mark(candidate);
+    }
+
+    const inputRect = input.getBoundingClientRect();
+    const candidates = Array.from(document.querySelectorAll('img, canvas')).filter((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.width >= 40
+        && rect.height >= 20
+        && Math.abs(rect.top - inputRect.top) < 250
+        && Math.abs(rect.left - inputRect.left) < 500;
+    });
+
+    return mark(candidates[0] || null);
+  });
+}
+
+async function recognizeCaptcha(locator) {
+  const image = await locator.screenshot();
+  const worker = await createWorker('eng');
+
+  try {
+    await worker.setParameters({
+      tessedit_char_whitelist: '0123456789',
+      tessedit_pageseg_mode: PSM.SINGLE_WORD
+    });
+    const { data } = await worker.recognize(image);
+    return (data?.text || '').replace(/\D/g, '').slice(0, 4);
+  } finally {
+    await worker.terminate();
+  }
 }
 
 async function extractResults(page, keyword) {
@@ -117,29 +165,55 @@ async function searchVghtpe(keyword) {
     const page = await context.newPage();
 
     try {
-      await page.goto(VGHTPE.searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      const { input, submit } = await waitForSearchForm(page);
+      let lastDebug = null;
 
-      await input.fill(keyword.toLowerCase());
+      for (let attempt = 1; attempt <= 4; attempt += 1) {
+        await page.goto(VGHTPE.searchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        const { input, captchaInput, submit } = await waitForSearchForm(page);
 
-      await Promise.all([
-        page.waitForURL(/\/home\/search-result/i, { timeout: 30000 }).catch(() => {}),
-        page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {}),
-        submit.click()
-      ]);
-      await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+        const title = await page.title().catch(() => '');
+        if (/just a moment/i.test(title)) {
+          throw new Error(`VGHTPE Cloudflare challenge not cleared. URL: ${page.url()}`);
+        }
 
-      const title = await page.title().catch(() => '');
-      if (/just a moment/i.test(title)) {
-        throw new Error(`VGHTPE Cloudflare challenge not cleared. URL: ${page.url()}`);
-      }
+        const captchaSelector = await markCaptchaElement(page);
+        if (!captchaSelector) {
+          const debug = await inspectPage(page);
+          throw new Error(`VGHTPE captcha element not found. DEBUG ${JSON.stringify(debug)}`);
+        }
 
-      const results = await extractResults(page, keyword);
-      if (results.length === 0) {
+        const captchaCode = await recognizeCaptcha(page.locator(captchaSelector).first());
+        if (captchaCode.length !== 4) {
+          lastDebug = { attempt, captchaCode, reason: 'ocr_not_four_digits' };
+          continue;
+        }
+
+        await input.fill(keyword.toLowerCase());
+        await captchaInput.fill(captchaCode);
+
+        await Promise.all([
+          page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {}),
+          submit.click()
+        ]);
+        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+
+        const results = await extractResults(page, keyword);
+        if (results.length > 0) {
+          return successResponse({ ...VGHTPE, keyword, results });
+        }
+
         const debug = await inspectPage(page);
+        lastDebug = { attempt, captchaCode, debug };
+
+        const bodyLower = (debug.bodyText || '').toLowerCase();
+        if (bodyLower.includes('驗證碼') || bodyLower.includes('必須填寫')) {
+          continue;
+        }
+
         throw new Error(`VGHTPE returned no parsed results. DEBUG ${JSON.stringify(debug)}`);
       }
-      return successResponse({ ...VGHTPE, keyword, results });
+
+      throw new Error(`VGHTPE OCR attempts exhausted. DEBUG ${JSON.stringify(lastDebug)}`);
     } finally {
       await context.close();
     }
