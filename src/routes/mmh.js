@@ -28,8 +28,30 @@ async function searchMmh(keyword) {
     const page = await context.newPage();
 
     try {
-      await page.goto(MMH.searchUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-      await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+      // Keep the bootstrap lightweight: MMH may hold the page open, but the
+      // initial response can still set the cookies we need for the API call.
+      await page.route('**/*', async (route) => {
+        const resourceType = route.request().resourceType();
+        if (['image', 'media', 'font'].includes(resourceType)) {
+          await route.abort();
+          return;
+        }
+        await route.continue();
+      });
+
+      let gotoTimedOut = false;
+      try {
+        await page.goto(MMH.searchUrl, { waitUntil: 'commit', timeout: 20000 });
+      } catch (error) {
+        if (error instanceof Error && /Timeout/i.test(error.message)) {
+          gotoTimedOut = true;
+        } else {
+          throw error;
+        }
+      }
+
+      await page.waitForTimeout(5000);
+      await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
 
       const bodyText = clean(await page.textContent('body').catch(() => ''));
       if (/request rejected|access denied|forbidden/i.test(bodyText)) {
@@ -109,6 +131,10 @@ async function searchMmh(keyword) {
             licenseUrl: clean(item.license)
           };
         });
+
+      if (results.length === 0 && gotoTimedOut) {
+        throw new Error(`MMH returned no results after bootstrap timeout. Body: ${bodyText.slice(0, 240)}`);
+      }
 
       return successResponse({ ...MMH, keyword, results });
     } finally {
