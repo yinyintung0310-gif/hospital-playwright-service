@@ -1,0 +1,19 @@
+{
+  "name": "playwright-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser automation service for hard-to-scrape hospital drug search flows",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "playwright": "^1.55.0"
+  }
+}
+
