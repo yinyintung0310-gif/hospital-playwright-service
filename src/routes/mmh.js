@@ -1,3 +1,4 @@
+const https = require('https');
 const { successResponse, errorResponse } = require('../lib/response');
 
 const MMH = {
@@ -20,35 +21,61 @@ function extractStrength(...values) {
 async function searchMmh(keyword) {
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36';
 
-  const response = await fetch(MMH.apiUrl, {
-    method: 'POST',
-    headers: {
-      'User-Agent': userAgent,
-      'Content-Type': 'application/json; charset=utf-8',
-      'X-Requested-With': 'XMLHttpRequest',
-      Origin: 'https://mcloud.mmh.org.tw',
-      Referer: MMH.searchUrl
-    },
-    body: JSON.stringify({
-      data: {
-        TYPE: '',
-        DRUG: keyword.trim(),
-        IMG: 'N',
-        myHospital: '1'
-      }
-    })
+  const payload = JSON.stringify({
+    data: {
+      TYPE: '',
+      DRUG: keyword.trim(),
+      IMG: 'N',
+      myHospital: '1'
+    }
   });
 
-  const text = await response.text();
+  const url = new URL(MMH.apiUrl);
+  const text = await new Promise((resolve, reject) => {
+    const request = https.request({
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port || 443,
+      path: `${url.pathname}${url.search}`,
+      method: 'POST',
+      headers: {
+        'User-Agent': userAgent,
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Length': Buffer.byteLength(payload),
+        'X-Requested-With': 'XMLHttpRequest',
+        Origin: 'https://mcloud.mmh.org.tw',
+        Referer: MMH.searchUrl
+      }
+    }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8');
+        if ((response.statusCode || 0) >= 400) {
+          reject(new Error(`MMH API failed (${response.statusCode}). Body: ${clean(body).slice(0, 240)}`));
+          return;
+        }
+        resolve(body);
+      });
+    });
+
+    request.on('error', (error) => {
+      reject(new Error(`MMH HTTPS request failed: ${error.message}`));
+    });
+
+    request.write(payload);
+    request.end();
+  });
+
   let json;
   try {
     json = JSON.parse(text);
   } catch (_error) {
-    throw new Error(`MMH API did not return JSON (${response.status}). Body: ${clean(text).slice(0, 240)}`);
+    throw new Error(`MMH API did not return JSON. Body: ${clean(text).slice(0, 240)}`);
   }
 
-  if (!response.ok || !Array.isArray(json)) {
-    throw new Error(`MMH API failed (${response.status}). Body: ${clean(text).slice(0, 240)}`);
+  if (!Array.isArray(json)) {
+    throw new Error(`MMH API returned unexpected payload. Body: ${clean(text).slice(0, 240)}`);
   }
 
   const results = json
